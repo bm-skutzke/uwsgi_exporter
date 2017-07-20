@@ -8,14 +8,16 @@ import (
 )
 
 type UwsgiStatsCollector struct {
-	Reader           *UwsgiStatsReader
-	ReadsDesc        *prometheus.Desc
-	ErrorDesc        *prometheus.Desc
-	UwsgiStats       []Stat
-	UwsgiSocketStats []Stat
-	UwsgiWorkerStats []Stat
-	UwsgiAppStats    []Stat
-	UwsgiCoreStats   []Stat
+	Reader                 *UwsgiStatsReader
+	ReadsDesc              *prometheus.Desc
+	ErrorDesc              *prometheus.Desc
+	UwsgiStats             []Stat
+	UwsgiSocketStats       []Stat
+	UwsgiWorkerStats       []Stat
+        // NEW: Count worker by status (busy/idle)
+        UwsgiWorkerStatusStats []Stat
+	UwsgiAppStats          []Stat
+	UwsgiCoreStats         []Stat
 }
 
 type Stat struct {
@@ -41,6 +43,10 @@ func (u *UwsgiStatsCollector) Describe(ch chan<- *prometheus.Desc) {
 	for _, stat := range u.UwsgiWorkerStats {
 		ch <- stat.Desc
 	}
+        // NEW: Count worker by status (busy/idle)
+       for _, stat := range u.UwsgiWorkerStatusStats {
+                ch <- stat.Desc
+        }
 	for _, stat := range u.UwsgiAppStats {
 		ch <- stat.Desc
 	}
@@ -79,8 +85,19 @@ func NewWorkerStatMetric(stat *Stat, value int, worker *UwsgiWorker, results *Uw
 		results.Type,
 		results.Identifier,
 		strconv.Itoa(worker.Id),
-		worker.Status,
+		// worker.Status,
 	)
+}
+
+// NEW: Count worker by status (busy/idle)
+func NewWorkerStatusStatMetric(stat *Stat, value int, results *UwsgiStatsReadResults) prometheus.Metric {
+        return prometheus.MustNewConstMetric(
+                stat.Desc,
+                stat.PrometheusType,
+                float64(value),
+                results.Type,
+                results.Identifier,
+        )
 }
 
 func NewAppStatMetric(stat *Stat, value int, app *UwsgiApp, worker *UwsgiWorker, results *UwsgiStatsReadResults) prometheus.Metric {
@@ -91,7 +108,7 @@ func NewAppStatMetric(stat *Stat, value int, app *UwsgiApp, worker *UwsgiWorker,
 		results.Type,
 		results.Identifier,
 		strconv.Itoa(worker.Id),
-		worker.Status,
+		// worker.Status,
 		strconv.Itoa(app.Id),
 		app.Mountpoint,
 		app.Chdir,
@@ -106,7 +123,7 @@ func NewCoreStatMetric(stat *Stat, value int, core *UwsgiCore, worker *UwsgiWork
 		results.Type,
 		results.Identifier,
 		strconv.Itoa(worker.Id),
-		worker.Status,
+		// worker.Status,
 		strconv.Itoa(core.Id),
 	)
 }
@@ -157,6 +174,20 @@ func (u *UwsgiStatsCollector) Collect(ch chan<- prometheus.Metric) {
 				ch <- NewWorkerStatMetric(&stat, value.(int), &uwsgi_worker, &results)
 			}
 		}
+                // NEW: Count worker by status (busy/idle)
+                for _, stat := range u.UwsgiWorkerStatusStats {
+                        count := 0;
+                        for _, uwsgi_worker := range results.UwsgiStats.Workers {
+                                value, err := reflections.GetField(uwsgi_worker, "Status")
+                                if err != nil {
+                                        panic(err)
+                                }
+                                if stat.Name == value {
+                                        count += 1
+                                }
+                        }
+                        ch <- NewWorkerStatusStatMetric(&stat, count, &results)
+                }
 		for _, stat := range u.UwsgiAppStats {
 			for _, worker := range results.UwsgiStats.Workers {
 				for _, app := range worker.Apps {
@@ -235,7 +266,8 @@ func NewUwsgiSocketStats() []Stat {
 func NewUwsgiWorkerStats() []Stat {
 	prefix := "uwsgi_stats_worker_"
 	suffix := "_total"
-	label_names := []string{"type", "identifier", "worker_id", "status"}
+	// label_names := []string{"type", "identifier", "worker_id", "status"}
+	label_names := []string{"type", "identifier", "worker_id"}
 	return []Stat{
 		NewUwsgiGaugeStat("Accepting", "Is this worker accepting requests?.", prefix, &label_names),
 		NewUwsgiCounterStat("Requests", "Number of requests.", prefix, suffix, &label_names),
@@ -254,10 +286,21 @@ func NewUwsgiWorkerStats() []Stat {
 	}
 }
 
+// NEW: Count worker by status (busy/idle)
+func NewUwsgiWorkerStatusStats() []Stat {
+        prefix := "uwsgi_stats_worker_"
+        label_names := []string{"type", "identifier"}
+        return []Stat{
+                NewUwsgiGaugeStat("idle", "Number of idle workers.", prefix, &label_names),
+                NewUwsgiGaugeStat("busy", "Number of busy workers.", prefix, &label_names),
+        }
+}
+
 func NewUwsgiAppStats() []Stat {
 	prefix := "uwsgi_stats_worker_app_"
 	suffix := "_total"
-	label_names := []string{"type", "identifier", "worker_id", "status", "app_id", "mountpoint", "chdir"}
+	// label_names := []string{"type", "identifier", "worker_id", "status", "app_id", "mountpoint", "chdir"}
+	label_names := []string{"type", "identifier", "worker_id", "app_id", "mountpoint", "chdir"}
 	return []Stat{
 		NewUwsgiGaugeStat("Startup_Time", "How long this app took to start.", prefix, &label_names),
 		NewUwsgiCounterStat("Requests", "Number of requests.", prefix, suffix, &label_names),
@@ -268,12 +311,13 @@ func NewUwsgiAppStats() []Stat {
 func NewUwsgiCoreStats() []Stat {
 	prefix := "uwsgi_stats_worker_core_"
 	suffix := "_total"
-	label_names := []string{"type", "identifier", "worker_id", "status", "core_id"}
+	// label_names := []string{"type", "identifier", "worker_id", "status", "core_id"}
+	label_names := []string{"type", "identifier", "worker_id", "core_id"}
 	return []Stat{
 		NewUwsgiCounterStat("Requests", "Number of requests.", prefix, suffix, &label_names),
 		NewUwsgiCounterStat("Static_Requests", "Number of static requests.", prefix, suffix, &label_names),
-		NewUwsgiCounterStat("Routed_Requests", "Number of routed requests.", prefix, suffix, &label_names),
-		NewUwsgiCounterStat("Offloaded_Requests", "Number of requests offloaded to threads.", prefix, suffix, &label_names),
+		NewUwsgiCounterStat("Routed_Requets", "Number of routed requests.", prefix, suffix, &label_names),
+		NewUwsgiCounterStat("Ofloaded_Requests", "Number of requests offloaded to threads.", prefix, suffix, &label_names),
 		NewUwsgiCounterStat("Write_Errors", "Number of write errors.", prefix, suffix, &label_names),
 		NewUwsgiCounterStat("Read_Errors", "Number of read errors.", prefix, suffix, &label_names),
 		NewUwsgiCounterStat("In_Requests", "Number of requests in.", prefix, suffix, &label_names),
@@ -296,10 +340,12 @@ func NewUwsgiStatsCollector(reader *UwsgiStatsReader) *UwsgiStatsCollector {
 			[]string{"type", "identifier"},
 			prometheus.Labels{},
 		),
-		UwsgiStats:       NewUwsgiStats(),
-		UwsgiSocketStats: NewUwsgiSocketStats(),
-		UwsgiWorkerStats: NewUwsgiWorkerStats(),
-		UwsgiAppStats:    NewUwsgiAppStats(),
-		UwsgiCoreStats:   NewUwsgiCoreStats(),
+		UwsgiStats:             NewUwsgiStats(),
+		UwsgiSocketStats:       NewUwsgiSocketStats(),
+                // NEW: Count worker by status (busy/idle)
+                UwsgiWorkerStatusStats: NewUwsgiWorkerStatusStats(),
+		UwsgiWorkerStats:       NewUwsgiWorkerStats(),
+		UwsgiAppStats:          NewUwsgiAppStats(),
+		UwsgiCoreStats:         NewUwsgiCoreStats(),
 	}
 }
